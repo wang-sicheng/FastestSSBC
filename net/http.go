@@ -28,16 +28,16 @@ var (
 	round       = 0
 	httpClients = make([]*HClient, 0)
 	//交易map
-	transMap = make(map[int]map[string][]string)
+	transMap = make(map[string]map[string][]string)
 	//第一轮投票统计
 	//round1Map = make(map[string][]meta.Vote)
 	round1Map sync.Map
 	//第二轮投票统计
 	//round2Map = make(map[string][]meta.ReVote)  //高并发场景下会出现协程并发写panic，故使用协程安全的
 	round2Map sync.Map
-	StartTime time.Time
-	EndTime   time.Time
-	Flag      bool
+	StartTime       time.Time
+	EndTime         time.Time
+	Flag            bool
 )
 
 type Server struct {
@@ -62,6 +62,7 @@ func init() {
 
 func HttpListen(addr string) {
 	r := gin.Default()
+	//压缩
 	//r.Use(gzip.Gzip(gzip.DefaultCompression))
 
 	//触发性能测试
@@ -87,15 +88,11 @@ func HttpListen(addr string) {
 func speedTest(ctx *gin.Context) {
 	//主节点触发，通知其他所有的节点
 	Broadcast("inform", []byte("inform"))
-	ctx.JSON(http.StatusOK,"Start Speed Test")
+	ctx.JSON(http.StatusOK, "Start Speed Test")
 }
 func inform(ctx *gin.Context) {
 	//所有节点收到触发，开始广播交易
-	//触发使用redis进行交易生成
-	if !Flag {
-		chain.GenerateTrans()
-	}
-	StartTime=time.Now()
+	StartTime = time.Now()
 	//开始广播交易
 	SendTrans()
 	ctx.JSON(http.StatusOK, "ok")
@@ -103,42 +100,61 @@ func inform(ctx *gin.Context) {
 
 //节点收到其他节点广播的交易集进行处理
 func broadcastTrans(ctx *gin.Context) {
-	//如果是主节点的话,接收所有的节点的交易，并且查找公共集
-	if commonconst.IsLeader {
-		tH := meta.TransHash{}
-		err := ctx.ShouldBindJSON(&tH)
-		if err != nil {
-			log.Error(err)
-		}
-		//记录收到的交易
-		if tMap, exists := transMap[round]; exists {
-			tMap[ctx.Request.RemoteAddr] = tH.TransHashs
-			transMap[round] = tMap
-		} else {
-			temMap := make(map[string][]string)
-			temMap[ctx.Request.RemoteAddr] = tH.TransHashs
-			transMap[round] = temMap
-		}
-		//判断是否收到了足量的请求
-		c := len(transMap[round])
-		if c == commonconst.Nodes {
-			//说明收到了所有节点的广播
-			//使用性能强悍的golang-set寻找公共集
-			commonTrans := findCommonTrans(transMap[round])
-			newBlock := meta.Block{TX: commonTrans}
+	//查找公共集
+	//如果是主节点的话,基于公共集建块
+	tHMsg:=meta.TransHashMsg{}
+	err := ctx.ShouldBindJSON(&tHMsg)
+	if err != nil {
+		log.Error(err)
+	}
+	//先验签
+	tH:=tHMsg.T
+	tHB,_:=json.Marshal(tH)
+	if !util.VerifySign(tHB,tHMsg.Sign,tHMsg.PubKey){
+		log.Info("验签失败")
+		return
+	}
+	//记录收到的交易
+	r := strconv.Itoa(round)
+	curBlockTranNum:=strconv.Itoa(commonconst.TransInBlock)
+
+	key:=r+"_"+curBlockTranNum
+	if tMap, exists := transMap[key]; exists {
+		tMap[ctx.Request.RemoteAddr] = tH.TransHashs
+		transMap[key] = tMap
+	} else {
+		temMap := make(map[string][]string)
+		temMap[ctx.Request.RemoteAddr] = tH.TransHashs
+		transMap[key] = temMap
+	}
+	//判断是否收到了足量的请求
+	c := len(transMap[key])
+	if c == commonconst.Nodes {
+		//说明收到了所有节点的广播
+		//使用性能强悍的golang-set寻找公共集
+		commonconst.CommonTransList = findCommonTrans(transMap[key])
+
+		go func() {
+			commonconst.Ready<-"ok"
+		}()
+		if commonconst.IsLeader{
+			//如果是主节点的话，建块广播
+			newBlock := meta.Block{TX: commonconst.CommonTransList}
 			newBlock = chain.GenerateNewBlock(chain.CurrentBlock, newBlock)
 			//开始广播区块
 			newBlockB, _ := json.Marshal(newBlock)
-			//log.Info("生成新区块")
-			Broadcast("newBlock", newBlockB)
-
-		} else {
-			//说明没有收到足够量的节点的广播
-			log.Info("Has Received TransHash Count:", c)
-			return
+			bMsg:=meta.BlockMsg{
+				B:      newBlock,
+				Sign:   util.Sign(newBlockB,commonconst.PrivateKey),
+				PubKey: commonconst.PublicKey,
+			}
+			bMsgB,_:=json.Marshal(bMsg)
+			Broadcast("newBlock", bMsgB)
 		}
 	} else {
-		log.Info("Not Leader")
+		//说明没有收到足够量的节点的广播
+		log.Info("Has Received TransHash Count:", c)
+		return
 	}
 
 }
@@ -158,10 +174,10 @@ func findCommonTrans(m map[string][]string) []meta.Transaction {
 	//基于公共交易集生成新区块
 	for _, t := range commonTranHashsSlice {
 		//基于hash值与交易信息的映射来获取到交易信息
-		if trans,exists:=chain.TransHashDataMap[t.(string)];exists{
+		if trans, exists := chain.TransHashDataMap[t.(string)]; exists {
 			commonTrans = append(commonTrans, trans)
-		}else {
-			log.Warning("交易漏失,hash=",t)
+		} else {
+			log.Warning("交易漏失,hash=", t)
 		}
 	}
 	return commonTrans
@@ -169,48 +185,61 @@ func findCommonTrans(m map[string][]string) []meta.Transaction {
 
 //节点接收到主节点广播的区块的处理
 func newBlock(ctx *gin.Context) {
-	nB := meta.Block{}
-	err := ctx.ShouldBindJSON(&nB)
+	nBMsg := meta.BlockMsg{}
+	err := ctx.ShouldBindJSON(&nBMsg)
 	if err != nil {
 		log.Error(err)
 	}
+	//先验签
+	nB:=nBMsg.B
+	nBB,_:=json.Marshal(nB)
+	if !util.VerifySign(nBB,nBMsg.Sign,nBMsg.PubKey){
+		log.Info("验签失败")
+		return
+	}
 
-
-	//nBB,_:=json.Marshal(nB)
-	//log.Info("接收到新区块",string(nBB))
-
-	//验证主节点打包的区块是否合法
 	vote := chain.VerifyBlock(nB)
 	//设置新区块
 	if vote {
 		chain.NewBlock = nB
 	}
 	//进行第一轮投票
-	v := &meta.Vote{Sender: ctx.Request.Host, Hash: nB.Hash, Vote: vote}
-	vB, err := json.Marshal(v)
-	if err != nil {
-		log.Error(err)
-	}
+	v := meta.Vote{Sender: ctx.Request.Host, Hash: nB.Hash, Vote: vote}
+	vB, _ := json.Marshal(v)
 	//广播第一轮投票
-	Broadcast("blockVoteRound1", vB)
+	vMsg:=meta.VoteMsg{
+		V:      v,
+		Sign:   util.Sign(vB,commonconst.PrivateKey),
+		PubKey: commonconst.PublicKey,
+	}
+	vMsgB,_:=json.Marshal(vMsg)
+	Broadcast("blockVoteRound1", vMsgB)
 }
 
 func blockVoteRound1(ctx *gin.Context) {
-	vote := meta.Vote{}
-	err := ctx.ShouldBindJSON(&vote)
+	voteMsg := meta.VoteMsg{}
+	err := ctx.ShouldBindJSON(&voteMsg)
 	if err != nil {
 		log.Error(err)
 	}
+	//先验签
+	vote:=voteMsg.V
+	voteB,_:=json.Marshal(vote)
+	if !util.VerifySign(voteB,voteMsg.Sign,voteMsg.PubKey){
+		log.Info("验签失败")
+		return
+	}
 	r := strconv.Itoa(round)
+	curBlockTranNum:=strconv.Itoa(commonconst.TransInBlock)
 	//投票数统计
-	key := r + "_" + "round1_" + vote.Hash
-	if val,ok:=round1Map.Load(key);ok{
-		votes:=val.([]meta.Vote)
-		votes=append(votes,vote)
-		round1Map.Store(key,votes)
-		val,_=round1Map.Load(key)
-		votes=val.([]meta.Vote)
-		if len(votes)==commonconst.Nodes{
+	key := r + "_"+ curBlockTranNum+ "_" + "round1_" + vote.Hash
+	if val, ok := round1Map.Load(key); ok {
+		votes := val.([]meta.Vote)
+		votes = append(votes, vote)
+		round1Map.Store(key, votes)
+		val, _ = round1Map.Load(key)
+		votes = val.([]meta.Vote)
+		if len(votes) == commonconst.Nodes {
 			//说明广播已收齐
 			log.Info("Received all votes,start round2")
 			//投票鉴别是否投同意
@@ -223,7 +252,7 @@ func blockVoteRound1(ctx *gin.Context) {
 			}
 
 			re := false
-			if float64(count) > float64(commonconst.Nodes)*0.75 {
+			if float64(count) >= float64(commonconst.Nodes)*0.75 {
 				re = true
 			}
 			//开始第二轮投票
@@ -234,39 +263,53 @@ func blockVoteRound1(ctx *gin.Context) {
 				V:      re,
 			}
 			rvB, _ := json.Marshal(rv)
-			Broadcast("blockVoteRound2", rvB)
-		}else {
+			rvMsg:=meta.ReVoteMsg{
+				R:      rv,
+				Sign:   util.Sign(rvB,commonconst.PrivateKey),
+				PubKey: commonconst.PublicKey,
+			}
+			rvMsgB,_:=json.Marshal(rvMsg)
+			Broadcast("blockVoteRound2", rvMsgB)
+		} else {
 			//说明广播还没收齐
 			log.Info("Round1 Not receive all votes:", votes)
 			return
 		}
-	}else {
-		votes:=make([]meta.Vote,0)
-		votes=append(votes,vote)
-		round1Map.Store(key,votes)
+	} else {
+		votes := make([]meta.Vote, 0)
+		votes = append(votes, vote)
+		round1Map.Store(key, votes)
 		return
 	}
 }
 
 //第二轮投票处理
 func blockVoteRound2(ctx *gin.Context) {
-	reVote := meta.ReVote{}
-	err := ctx.ShouldBindJSON(&reVote)
+	reVoteMsg := meta.ReVoteMsg{}
+	err := ctx.ShouldBindJSON(&reVoteMsg)
 	if err != nil {
 		log.Error(err)
 	}
-	log.Info("收到第二轮投票:",reVote)
+	//先验签
+	reVote:=reVoteMsg.R
+	reVoteB,_:=json.Marshal(reVote)
+	if !util.VerifySign(reVoteB,reVoteMsg.Sign,reVoteMsg.PubKey){
+		log.Info("验签失败")
+		return
+	}
 	//投票数统计
+	log.Info("收到第二轮投票:", reVote)
 	r := strconv.Itoa(round)
-	key := r + "_" + "round2_" + reVote.Hash
+	curBlockTranNum:=strconv.Itoa(commonconst.TransInBlock)
+	key := r + "_" +curBlockTranNum+ "_" + "round2_" + reVote.Hash
 
-	if val,ok:=round2Map.Load(key);ok{
-		votes:=val.([]meta.ReVote)
-		votes=append(votes,reVote)
-		round2Map.Store(key,votes)
-		val,_=round2Map.Load(key)
-		votes=val.([]meta.ReVote)
-		if len(votes)==commonconst.Nodes{
+	if val, ok := round2Map.Load(key); ok {
+		votes := val.([]meta.ReVote)
+		votes = append(votes, reVote)
+		round2Map.Store(key, votes)
+		val, _ = round2Map.Load(key)
+		votes = val.([]meta.ReVote)
+		if len(votes) == commonconst.Nodes {
 			//说明投票已收齐
 			//先进行区块hash核验
 			if reVote.Hash == chain.NewBlock.Hash && reVote.Hash != chain.CurrentBlock.Hash {
@@ -277,7 +320,7 @@ func blockVoteRound2(ctx *gin.Context) {
 						count++
 					}
 				}
-				if float64(count) > float64(commonconst.Nodes)*0.75 {
+				if float64(count) >= float64(commonconst.Nodes)*0.75 {
 					//第二轮投票过3/4,新区块固化
 					chain.StoreNewBlock()
 					//本轮交易共识上链流程TPS估算
@@ -289,16 +332,16 @@ func blockVoteRound2(ctx *gin.Context) {
 				log.Error("区块Hash校验失败")
 				return
 			}
-		}else {
+		} else {
 			//说明票还没收齐
 			//说明广播还没收齐
 			log.Info("Round2 Not receive all votes:", votes)
 			return
 		}
-	}else {
-		votes:=make([]meta.ReVote,0)
-		votes=append(votes,reVote)
-		round2Map.Store(key,votes)
+	} else {
+		votes := make([]meta.ReVote, 0)
+		votes = append(votes, reVote)
+		round2Map.Store(key, votes)
 		return
 	}
 }
@@ -330,7 +373,7 @@ func JudgeNextRound() {
 		round = 0
 		//Step2:交易数按固定增幅增加
 		commonconst.TransInBlock = commonconst.TransInBlock + commonconst.TransInBlockStep
-		if commonconst.IsLeader && commonconst.TransInBlock<=commonconst.MaxTransInBlock{
+		if commonconst.IsLeader && commonconst.TransInBlock <= commonconst.MaxTransInBlock {
 			//主节点开启新一轮的触发
 			go Broadcast("inform", []byte("inform"))
 		}
@@ -341,37 +384,36 @@ func SendTrans() {
 	//先从redis中取交易
 	log.Infof("第%d轮开始", round)
 	trans := chain.PullTrans()
-	//transB,_:=util.Fastestjson.Marshal(trans)
-
 	//广播的不是交易，而是hash
 	tT := meta.TransHash{}
-	//先将每个交易进行hash
 	hashs := make([]string, 0)
 	for _, t := range trans {
-		tB, _ := json.Marshal(t)
-		h := util.CalHash(tB)
-		//将hash值与交易数据的映射关系进行保存
-		chain.TransHashDataMap[h] = t
-		hashs = append(hashs, h)
+		hashs = append(hashs, t.Hash)
 	}
 
 	tT.BlockHash = chain.CurrentBlock.Hash
 	tT.TransHashs = hashs
 	tTB, _ := json.Marshal(tT)
-
-	Broadcast("broadcastTrans", tTB)
+	sg:=util.Sign(tTB,commonconst.PrivateKey)
+	tTMSg:=meta.TransHashMsg{
+		T:      tT,
+		Sign:   sg,
+		PubKey: commonconst.PublicKey,
+	}
+	tTMSgB,_:=json.Marshal(tTMSg)
+	Broadcast("broadcastTrans",tTMSgB )
 
 }
 
 //广播
-func Broadcast(s string, reqBody []byte)  {
+func Broadcast(s string, reqBody []byte) {
 	for _, client := range httpClients {
-		//go send(client,s,reqBody) //并发发送
-		send(client,s,reqBody)
+		go send(client,s,reqBody) //并发发送
+		//send(client, s, reqBody)
 	}
 }
 
-func send(c *HClient,s string,reqBody []byte)  {
+func send(c *HClient, s string, reqBody []byte) {
 	endPoint := c.Url + "/" + s
 	req, err := NewPost(endPoint, reqBody)
 	if err != nil {
@@ -387,7 +429,7 @@ func send(c *HClient,s string,reqBody []byte)  {
 func NewPost(endPoint string, reqBody []byte) (*http.Request, error) {
 	req, err := http.NewRequest("POST", endPoint, bytes.NewReader(reqBody))
 	if err != nil {
-		log.Error("[NewPost] err:",err)
+		log.Error("[NewPost] err:", err)
 		return nil, errors.New("Failed posting to " + endPoint)
 	}
 	return req, nil

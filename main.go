@@ -3,6 +3,7 @@ package main
 import (
 	"github.com/cloudflare/cfssl/log"
 	"github.com/fastestssbc/commonconst"
+	"github.com/fastestssbc/levelDB"
 	"github.com/fastestssbc/net"
 	"github.com/fastestssbc/util"
 	"os"
@@ -18,6 +19,7 @@ func main() {
 		commonconst.IsLeader = true
 	}
 
+	levelDB.InitDB(nodeID)
 	//TPS测试日志重定向
 	if commonconst.IsLeader{
 		if util.IsExist("log"){
@@ -28,6 +30,8 @@ func main() {
 		defer f.Close()
 	}
 
+	//生成公私钥
+	commonconst.PrivateKey,commonconst.PublicKey=util.GetKeyPair()
 	if addr, ok := commonconst.NodeTable[nodeID]; ok {
 		//开启监听
 		net.HttpListen(addr)

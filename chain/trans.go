@@ -6,6 +6,7 @@ import (
 	"github.com/fastestssbc/commonconst"
 	"github.com/fastestssbc/meta"
 	"github.com/fastestssbc/redis"
+	"github.com/fastestssbc/util"
 	"strconv"
 )
 
@@ -13,6 +14,10 @@ var (
 	//保存交易与hash值一一对应的映射
 	TransHashDataMap = make(map[string]meta.Transaction)
 )
+
+func init()  {
+	GenerateTrans()
+}
 
 //生成待测交易存至redis
 func GenerateTrans() {
@@ -38,6 +43,11 @@ func generateTx() []meta.Transaction {
 			Signature: "Signature",
 			Message:   "Message",
 		}
+		tB, _ := json.Marshal(tmp)
+		h := util.CalHash(tB)
+		tmp.Hash=h
+		//将hash值与交易数据的映射关系进行保存
+		TransHashDataMap[h] = tmp
 		txs = append(txs, tmp)
 	}
 	return txs

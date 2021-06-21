@@ -2,7 +2,10 @@ package chain
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"github.com/cloudflare/cfssl/log"
+	"github.com/fastestssbc/commonconst"
+	"github.com/fastestssbc/levelDB"
 	"github.com/fastestssbc/merkle"
 	"github.com/fastestssbc/meta"
 	"github.com/fastestssbc/util"
@@ -47,6 +50,9 @@ func GenerateNewBlock(oldBlock meta.Block, newBlock meta.Block) meta.Block {
 func StoreNewBlock() {
 	BlockChain = append(BlockChain, NewBlock)
 	CurrentBlock = NewBlock
+	//入库
+	BlockChainB,_:=json.Marshal(BlockChain)
+	levelDB.DBPut(commonconst.BlockChain,BlockChainB)
 	log.Info("Store NewBlock SuccessFully!")
 }
 
@@ -62,8 +68,6 @@ func verifyBlock(block meta.Block) bool {
 	//验证逻辑 验签 验证交易 验证merkle tree root
 	if block.PrevHash != CurrentBlock.Hash {
 		log.Error("区块验证失败：区块Hash值非法")
-		//log.Info("block.PrevHash=",block.PrevHash)
-		//log.Info("CurrentBlock.Hash=",CurrentBlock.Hash)
 		return false
 	}
 	if block.Signature != "Signature" {
@@ -74,7 +78,8 @@ func verifyBlock(block meta.Block) bool {
 }
 
 func verifyBlockTx(b meta.Block) bool {
-	if len(b.TX) != len(TransHashDataMap) {
+	<-commonconst.Ready
+	if len(b.TX) != len(commonconst.CommonTransList) {
 		log.Error("所收主节点的区块交易与本地交易数量不一致")
 		return false
 	}
