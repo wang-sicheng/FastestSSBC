@@ -112,8 +112,6 @@ func Compress(in []byte) []byte  {
 	w.Flush()
 	fmt.Println("gzip size:", len(b.Bytes()))
 	return b.Bytes()
-
-
 }
 
 //解压
@@ -123,10 +121,9 @@ func DeCompress(in []byte)[]byte  {
 	r, _ := gzip.NewReader(&b)
 	defer r.Close()
 	undatas, _ := ioutil.ReadAll(r)
-	fmt.Println("ungzip size:", len(undatas))
+	//fmt.Println("ungzip size:", len(undatas))
 	return undatas
 }
-
 
 //数字签名
 func Sign(data []byte, keyBytes []byte) []byte {

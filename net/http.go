@@ -10,6 +10,8 @@ import (
 	"github.com/fastestssbc/commonconst"
 	"github.com/fastestssbc/meta"
 	"github.com/fastestssbc/util"
+	"io/ioutil"
+
 	//"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
 	"github.com/pkg/errors"
@@ -38,6 +40,7 @@ var (
 	StartTime       time.Time
 	EndTime         time.Time
 	Flag            bool
+	NeedZip = true
 )
 
 type Server struct {
@@ -92,9 +95,7 @@ func speedTest(ctx *gin.Context) {
 }
 func inform(ctx *gin.Context) {
 	//所有节点收到触发，开始广播交易
-	StartTime = time.Now()
-	//开始广播交易
-	SendTrans()
+	go SendTrans()
 	ctx.JSON(http.StatusOK, "ok")
 }
 
@@ -103,9 +104,16 @@ func broadcastTrans(ctx *gin.Context) {
 	//查找公共集
 	//如果是主节点的话,基于公共集建块
 	tHMsg:=meta.TransHashMsg{}
-	err := ctx.ShouldBindJSON(&tHMsg)
-	if err != nil {
-		log.Error(err)
+	if NeedZip{
+		res,_:=ioutil.ReadAll(ctx.Request.Body)
+		//解压
+		res=util.DeCompress(res)
+		json.Unmarshal(res,&tHMsg)
+	}else {
+		err := ctx.ShouldBindJSON(&tHMsg)
+		if err != nil {
+			log.Error(err)
+		}
 	}
 	//先验签
 	tH:=tHMsg.T
@@ -149,6 +157,11 @@ func broadcastTrans(ctx *gin.Context) {
 				PubKey: commonconst.PublicKey,
 			}
 			bMsgB,_:=json.Marshal(bMsg)
+			if NeedZip{
+				bMsgBZip:=util.Compress(bMsgB)
+				Broadcast("newBlock", bMsgBZip)
+				return
+			}
 			Broadcast("newBlock", bMsgB)
 		}
 	} else {
@@ -186,9 +199,16 @@ func findCommonTrans(m map[string][]string) []meta.Transaction {
 //节点接收到主节点广播的区块的处理
 func newBlock(ctx *gin.Context) {
 	nBMsg := meta.BlockMsg{}
-	err := ctx.ShouldBindJSON(&nBMsg)
-	if err != nil {
-		log.Error(err)
+	if NeedZip{
+		res,_:=ioutil.ReadAll(ctx.Request.Body)
+		//先解压
+		res=util.DeCompress(res)
+		json.Unmarshal(res,&nBMsg)
+	}else {
+		err := ctx.ShouldBindJSON(&nBMsg)
+		if err != nil {
+			log.Error(err)
+		}
 	}
 	//先验签
 	nB:=nBMsg.B
@@ -385,6 +405,7 @@ func SendTrans() {
 	log.Infof("第%d轮开始", round)
 	trans := chain.PullTrans()
 	//广播的不是交易，而是hash
+	StartTime = time.Now()
 	tT := meta.TransHash{}
 	hashs := make([]string, 0)
 	for _, t := range trans {
@@ -401,6 +422,11 @@ func SendTrans() {
 		PubKey: commonconst.PublicKey,
 	}
 	tTMSgB,_:=json.Marshal(tTMSg)
+	if NeedZip{
+		tTMSgBZip:=util.Compress(tTMSgB)
+		Broadcast("broadcastTrans",tTMSgBZip )
+		return
+	}
 	Broadcast("broadcastTrans",tTMSgB )
 
 }
