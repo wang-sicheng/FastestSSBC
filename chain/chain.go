@@ -47,13 +47,14 @@ func GenerateNewBlock(oldBlock meta.Block, newBlock meta.Block) meta.Block {
 }
 
 //保存区块
-func StoreNewBlock() {
-	BlockChain = append(BlockChain, NewBlock)
-	CurrentBlock = NewBlock
+func StoreNewBlock(round int, block meta.Block) {
+	//BlockChain = append(BlockChain, NewBlock)
+	//CurrentBlock = NewBlock
 	//入库
-	BlockChainB,_:=json.Marshal(BlockChain)
-	levelDB.DBPut(commonconst.BlockChain,BlockChainB)
-	log.Infof("TotalRound: %v, Store NewBlock SuccessFully!\n", commonconst.TotalRound - 1)
+	//BlockChainB,_:=json.Marshal(BlockChain)
+	newBlockB, _ := json.Marshal(block)
+	levelDB.DBPut(commonconst.BlockChain + string(round), newBlockB)
+	log.Infof("TotalRound: %v, Store NewBlock SuccessFully!\n", round - 1)
 }
 
 func VerifyBlock(block meta.Block) bool {

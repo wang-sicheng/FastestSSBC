@@ -393,8 +393,9 @@ func blockVoteRound2(ctx *gin.Context) {
 				}
 				//log.Infof("count: %v\n", count)
 				if float64(count) >= float64(commonconst.Nodes)*1 {
+					chain.CurrentBlock = chain.NewBlock
 					//第二轮投票过3/4,新区块固化
-					chain.StoreNewBlock()
+					go chain.StoreNewBlock(commonconst.TotalRound, chain.NewBlock)
 					//本轮交易共识上链流程TPS估算
 					CalCulTPS()
 					//判断是否开启新的一轮交易共识上链流程
