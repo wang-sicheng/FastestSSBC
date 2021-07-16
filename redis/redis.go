@@ -27,6 +27,15 @@ func SetIntoRedis(key string, value string) error {
 	return err
 }
 
+//set
+func SetIntoRedisInt(key string, value int) error {
+	err := rdb.Set(ctx, key, value, 0).Err()
+	if err != nil {
+		panic(err)
+	}
+	return err
+}
+
 //get
 func GetFromRedis(key string) (string, error) {
 	val, err := rdb.Get(ctx, key).Result()

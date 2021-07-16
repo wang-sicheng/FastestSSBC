@@ -53,7 +53,7 @@ func StoreNewBlock() {
 	//入库
 	BlockChainB,_:=json.Marshal(BlockChain)
 	levelDB.DBPut(commonconst.BlockChain,BlockChainB)
-	log.Info("Store NewBlock SuccessFully!")
+	log.Infof("TotalRound: %v, Store NewBlock SuccessFully!\n", commonconst.TotalRound - 1)
 }
 
 func VerifyBlock(block meta.Block) bool {
@@ -74,7 +74,8 @@ func verifyBlock(block meta.Block) bool {
 		log.Info("verify block: Signature mismatch")
 		return false
 	}
-	return verifyBlockTx(block)
+	//return verifyBlockTx(block)
+	return true
 }
 
 func verifyBlockTx(b meta.Block) bool {

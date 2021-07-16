@@ -5,12 +5,12 @@ import "github.com/fastestssbc/meta"
 const (
 	Nodes            = 4
 	TransInRedis     = 10000
-	TransInBlockStep = 500 //每次区块中交易数的增幅调动
+	TransInBlockStep = 300 //每次区块中交易数的增幅调动
 )
 
 var (
-	TransInBlock    = 5000
-	MaxTransInBlock = 7000 //先不用跑完十轮后增加再跑，先直接跑十轮看结果
+	TransInBlock    = 100
+	MaxTransInBlock = 10000 //先不用跑完十轮后增加再跑，先直接跑十轮看结果
 	Rounds          = 2
 	IsLeader        = false
 	Ready			= make(chan string)
@@ -18,6 +18,7 @@ var (
 	PublicKey  		[]byte //公钥
 	//公共交易集
 	CommonTransList = make([]meta.Transaction,0)
+	TotalRound = 0
 )
 
 //redis key
@@ -34,10 +35,10 @@ var Urls = []string{
 	"http://127.0.0.1:8003",
 }
 //var Urls = []string{
-//	"http://192.168.1.101:8000",
-//	"http://192.168.1.155:8001",
-//	"http://192.168.1.102:8002",
-//	"http://192.168.1.104:8003",
+	//"http://192.168.1.101:8000",
+	//"http://192.168.1.155:8001",
+	//"http://192.168.1.102:8002",
+	//"http://192.168.1.104:8003",
 //}
 
 //生成全局变量-节点池

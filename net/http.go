@@ -9,6 +9,7 @@ import (
 	"github.com/fastestssbc/chain"
 	"github.com/fastestssbc/commonconst"
 	"github.com/fastestssbc/meta"
+	"github.com/fastestssbc/redis"
 	"github.com/fastestssbc/util"
 	"io/ioutil"
 
@@ -37,10 +38,15 @@ var (
 	//第二轮投票统计
 	//round2Map = make(map[string][]meta.ReVote)  //高并发场景下会出现协程并发写panic，故使用协程安全的
 	round2Map sync.Map
+	roundOkMap sync.Map
 	StartTime       time.Time
 	EndTime         time.Time
 	Flag            bool
-	NeedZip = true
+	NeedZip = false
+
+	mutex1 sync.Mutex	// 第一轮投票计数
+    mutex2 sync.Mutex	// 第二轮投票计数
+    mutexRoundOk sync.Mutex // 统计RoundOk票数
 )
 
 type Server struct {
@@ -71,15 +77,22 @@ func HttpListen(addr string) {
 	//触发性能测试
 	r.GET("/speedTest", speedTest)
 	//触发其他节点
-	r.POST("/inform", inform)
+	//r.POST("/inform", inform)
 	//广播交易
-	r.POST("/broadcastTrans", broadcastTrans)
+	//r.POST("/broadcastTrans", broadcastTrans)
+
+
+	//广播区块
+	r.POST("/broadcastBlock", broadcastBlock)
+
 	//处理新区块
 	r.POST("/newBlock", newBlock)
 	//处理第一轮投票结果
 	r.POST("/blockVoteRound1", blockVoteRound1)
 	//获取到指定高度区块的交易列表
 	r.POST("/blockVoteRound2", blockVoteRound2)
+
+	r.POST("/roundOk", roundOk)
 
 	err := r.Run(addr)
 	if err != nil {
@@ -90,12 +103,13 @@ func HttpListen(addr string) {
 
 func speedTest(ctx *gin.Context) {
 	//主节点触发，通知其他所有的节点
-	Broadcast("inform", []byte("inform"))
+	Broadcast("broadcastBlock", []byte("broadcastBlock"))
 	ctx.JSON(http.StatusOK, "Start Speed Test")
 }
 func inform(ctx *gin.Context) {
 	//所有节点收到触发，开始广播交易
-	go SendTrans()
+	//go SendTrans()
+	Broadcast("broadcastBlock", []byte("broadcastBlock"))
 	ctx.JSON(http.StatusOK, "ok")
 }
 
@@ -166,10 +180,40 @@ func broadcastTrans(ctx *gin.Context) {
 		}
 	} else {
 		//说明没有收到足够量的节点的广播
-		log.Info("Has Received TransHash Count:", c)
+		//log.Info("Has Received TransHash Count:", c)
 		return
 	}
 
+}
+
+func broadcastBlock(ctx *gin.Context) {
+	log.Infof("isLeader: %v\n", commonconst.IsLeader)
+	log.Infof("第%d轮开始----------------------------------------------------------------------------------------------------------------------------------", commonconst.TotalRound)
+	commonconst.TotalRound++
+	key := "roundOk"
+	redis.SetIntoRedisInt(key, 0)
+	if commonconst.IsLeader{
+		StartTime = time.Now()
+		//先从redis中取交易
+		//如果是主节点的话，建块广播
+		commonconst.CommonTransList = chain.PullTrans()
+		newBlock := meta.Block{TX: commonconst.CommonTransList}
+		newBlock = chain.GenerateNewBlock(chain.CurrentBlock, newBlock)
+		//开始广播区块
+		newBlockB, _ := json.Marshal(newBlock)
+		bMsg:=meta.BlockMsg{
+			B:      newBlock,
+			Sign:   util.Sign(newBlockB,commonconst.PrivateKey),
+			PubKey: commonconst.PublicKey,
+		}
+		bMsgB,_:=json.Marshal(bMsg)
+		if NeedZip{
+			bMsgBZip:=util.Compress(bMsgB)
+			Broadcast("newBlock", bMsgBZip)
+			return
+		}
+		Broadcast("newBlock", bMsgB)
+	}
 }
 
 func findCommonTrans(m map[string][]string) []meta.Transaction {
@@ -217,7 +261,6 @@ func newBlock(ctx *gin.Context) {
 		log.Info("验签失败")
 		return
 	}
-
 	vote := chain.VerifyBlock(nB)
 	//设置新区块
 	if vote {
@@ -253,6 +296,10 @@ func blockVoteRound1(ctx *gin.Context) {
 	curBlockTranNum:=strconv.Itoa(commonconst.TransInBlock)
 	//投票数统计
 	key := r + "_"+ curBlockTranNum+ "_" + "round1_" + vote.Hash
+
+	mutex2.Lock()
+	defer mutex2.Unlock()
+
 	if val, ok := round1Map.Load(key); ok {
 		votes := val.([]meta.Vote)
 		votes = append(votes, vote)
@@ -261,7 +308,7 @@ func blockVoteRound1(ctx *gin.Context) {
 		votes = val.([]meta.Vote)
 		if len(votes) == commonconst.Nodes {
 			//说明广播已收齐
-			log.Info("Received all votes,start round2")
+			//log.Info("Received all votes,start round2")
 			//投票鉴别是否投同意
 			count := 0
 			for _, v := range votes {
@@ -272,7 +319,7 @@ func blockVoteRound1(ctx *gin.Context) {
 			}
 
 			re := false
-			if float64(count) >= float64(commonconst.Nodes)*0.75 {
+			if float64(count) >= float64(commonconst.Nodes)*1 {
 				re = true
 			}
 			//开始第二轮投票
@@ -292,7 +339,7 @@ func blockVoteRound1(ctx *gin.Context) {
 			Broadcast("blockVoteRound2", rvMsgB)
 		} else {
 			//说明广播还没收齐
-			log.Info("Round1 Not receive all votes:", votes)
+			//log.Info("Round1 Not receive all votes:", votes)
 			return
 		}
 	} else {
@@ -318,20 +365,24 @@ func blockVoteRound2(ctx *gin.Context) {
 		return
 	}
 	//投票数统计
-	log.Info("收到第二轮投票:", reVote)
+	//log.Info("收到第二轮投票:", reVote)
 	r := strconv.Itoa(round)
 	curBlockTranNum:=strconv.Itoa(commonconst.TransInBlock)
 	key := r + "_" +curBlockTranNum+ "_" + "round2_" + reVote.Hash
 
+	mutex2.Lock()
+	defer mutex2.Unlock()
 	if val, ok := round2Map.Load(key); ok {
 		votes := val.([]meta.ReVote)
 		votes = append(votes, reVote)
 		round2Map.Store(key, votes)
 		val, _ = round2Map.Load(key)
 		votes = val.([]meta.ReVote)
+		//log.Infof("votes count: %v\n", len(votes))
 		if len(votes) == commonconst.Nodes {
 			//说明投票已收齐
 			//先进行区块hash核验
+			//log.Infof("reVote.Hash: %v, chain.NewBlock.Hash: %v, chain.CurrentBlock.Hash: %v\n", reVote.Hash, chain.NewBlock.Hash, chain.CurrentBlock.Hash)
 			if reVote.Hash == chain.NewBlock.Hash && reVote.Hash != chain.CurrentBlock.Hash {
 				count := 0
 				for _, v := range votes {
@@ -340,13 +391,15 @@ func blockVoteRound2(ctx *gin.Context) {
 						count++
 					}
 				}
-				if float64(count) >= float64(commonconst.Nodes)*0.75 {
+				//log.Infof("count: %v\n", count)
+				if float64(count) >= float64(commonconst.Nodes)*1 {
 					//第二轮投票过3/4,新区块固化
 					chain.StoreNewBlock()
 					//本轮交易共识上链流程TPS估算
 					CalCulTPS()
 					//判断是否开启新的一轮交易共识上链流程
-					JudgeNextRound()
+					//JudgeNextRound()
+					Broadcast("roundOk", []byte("roundOk"))
 				}
 			} else {
 				log.Error("区块Hash校验失败")
@@ -355,7 +408,7 @@ func blockVoteRound2(ctx *gin.Context) {
 		} else {
 			//说明票还没收齐
 			//说明广播还没收齐
-			log.Info("Round2 Not receive all votes:", votes)
+			//log.Info("Round2 Not receive all votes:", votes)
 			return
 		}
 	} else {
@@ -363,6 +416,29 @@ func blockVoteRound2(ctx *gin.Context) {
 		votes = append(votes, reVote)
 		round2Map.Store(key, votes)
 		return
+	}
+}
+
+func roundOk(ctx *gin.Context) {
+	if commonconst.IsLeader {
+		mutexRoundOk.Lock()
+		defer mutexRoundOk.Unlock()
+		key := "roundOk"
+		countStr, err := redis.GetFromRedis(key)
+		if err != nil {
+			countStr = "0"
+		}
+		count, err := strconv.Atoi(countStr)
+		//log.Infof("count number: %v\n", count)
+		if err != nil {
+			log.Infof("GetFromRedis err: %v\n", err)
+		}
+		if count == 3 {
+			redis.SetIntoRedisInt(key, 0)
+			JudgeNextRound()
+		} else {
+			redis.SetIntoRedisInt(key, count + 1)
+		}
 	}
 }
 
@@ -385,7 +461,8 @@ func JudgeNextRound() {
 		round++
 		if commonconst.IsLeader {
 			//主节点开启新一轮的触发
-			go Broadcast("inform", []byte("inform"))
+			//go Broadcast("inform", []byte("inform"))
+			Broadcast("broadcastBlock", []byte("broadcastBlock"))
 		}
 	} else {
 		//说明在区块指定交易数情况下跑到了指定的轮次，更改区块内交易数参数
@@ -395,14 +472,15 @@ func JudgeNextRound() {
 		commonconst.TransInBlock = commonconst.TransInBlock + commonconst.TransInBlockStep
 		if commonconst.IsLeader && commonconst.TransInBlock <= commonconst.MaxTransInBlock {
 			//主节点开启新一轮的触发
-			go Broadcast("inform", []byte("inform"))
+			//go Broadcast("inform", []byte("inform"))
+			Broadcast("broadcastBlock", []byte("broadcastBlock"))
 		}
 	}
 }
 
 func SendTrans() {
 	//先从redis中取交易
-	log.Infof("第%d轮开始", round)
+	log.Infof("第%d轮开始----------------------------------------------------------------------------------------------------------------------------------", round)
 	trans := chain.PullTrans()
 	//广播的不是交易，而是hash
 	StartTime = time.Now()
